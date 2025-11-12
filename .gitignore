@@ -1,0 +1,53 @@
+# Archivos y carpetas de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entorno virtual
+venv/
+cenv/
+env/
+*.env
+*.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Configuración de Django
+db.sqlite3
+*.sqlite3
+/media/
+media/
+staticfiles/
+static/
+.env
+pawify/settings.py
+
+# Configuración de logs y depuración
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+*.swn
+
+# Archivos de migraciones innecesarios (opcional)
+# **/migrations/*.py
+# !**/migrations/__init__.py
+
+# Archivos de IDEs y editores de código
+.vscode/
+.idea/
+*.iml
+
+# Archivos de compilación y caché
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Others
+docs/
+
+venv
