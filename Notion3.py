@@ -628,7 +628,11 @@ def start_main_app():
             base_path = os.path.abspath(".")
         return os.path.join(base_path, relative_path)
 
-    root.iconbitmap(resource_path("favicon.ico"))
+    try:
+        root.iconbitmap(resource_path("favicon.ico"))
+    
+    except Exception as e:
+        print(f"No se pudo cargar el icono: {e}")
     
     font_style = ("Helvetica", 12)
     
