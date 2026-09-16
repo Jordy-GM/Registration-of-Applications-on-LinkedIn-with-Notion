@@ -33,9 +33,15 @@ FONT_TITLE = ("Helvetica", 16, "bold")
 CONFIG_FILE = "config.json"
 
 # Modelos de Groq. Groq actualiza su catálogo con frecuencia; si alguno se
-# retira, revisa el reemplazo vigente en https://console.groq.com/docs/models
+# retira o da "model_not_found" (a veces requiere activarlo primero en
+# https://console.groq.com/playground), revisa el reemplazo vigente en
+# https://console.groq.com/docs/models
 GROQ_TEXT_MODEL = "llama-3.3-70b-versatile"
-GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
+
+# Lista de modelos de visión a intentar en orden. Si el primero falla por
+# "modelo no encontrado / sin acceso", se reintenta automáticamente con el
+# siguiente de la lista antes de rendirse.
+GROQ_VISION_MODELS = ["qwen/qwen3.8-27b", "qwen/qwen3.6-27b"]
 
 NOTION_VERSION = "2026-03-11"
 MAX_DESCRIPTION_LEN = 2000
@@ -276,6 +282,16 @@ def finalize_job_data(job_data, source_label):
         job_data["Descripción"] = job_data["Descripción"][:MAX_DESCRIPTION_LEN]
     return job_data
 
+def is_model_unavailable_error(exc):
+    """Detecta si el error de Groq es por modelo inexistente/sin acceso (para hacer fallback)"""
+    message = str(exc).lower()
+    return (
+        "model_not_found" in message
+        or "does not exist" in message
+        or "do not have access" in message
+        or "404" in message
+    )
+
 # ==================== FUNCIÓN: EXTRAER CON GROQ (TEXTO) ====================
 
 def extract_with_groq(text):
@@ -343,20 +359,17 @@ def encode_pil_image_to_base64(pil_image):
     """Convierte una imagen PIL a una cadena base64 en formato JPEG"""
     return base64.b64encode(pil_image_to_jpeg_bytes(pil_image)).decode("utf-8")
 
-
-def extract_with_groq_image(base64_image):
-    """Extrae información de una oferta laboral a partir de una imagen usando Groq Vision"""
-    try:
-        prompt = f"""
+def build_image_extraction_prompt():
+    return f"""
 Analiza esta imagen de una publicación de oferta laboral (puede ser una captura de pantalla de
 LinkedIn, un flyer, un aviso, etc.) y extrae la información en formato JSON.
 Si algún campo no está presente, usa "No especificado".
- 
+
 Responde ÚNICAMENTE con un objeto JSON válido con esta estructura exacta:
 {JOB_JSON_STRUCTURE}
 {JOB_EXTRACTION_RULES}
 - Lee CUIDADOSAMENTE todo el texto visible en la imagen, incluyendo letras pequeñas, pies de página y logos con texto.
- 
+
 REGLAS ESPECÍFICAS PARA "Descripción":
 - El campo "Descripción" debe ser una TRANSCRIPCIÓN COMPLETA Y LITERAL de TODO el texto de la
   publicación, de principio a fin, línea por línea, en el mismo orden en que aparece.
@@ -369,48 +382,72 @@ REGLAS ESPECÍFICAS PARA "Descripción":
   aparece en el texto.
 - Preserva los saltos de línea/párrafos usando \\n para separar secciones, igual que en la imagen.
 """
-        response = groq_client.chat.completions.create(
-            model=GROQ_VISION_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {
-                            "url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ],
-            temperature=0.1,
-            max_tokens=2048,
-            # qwen3.6-27b es un modelo de razonamiento: sin esto, la respuesta
-            # puede quedar entera en el "pensamiento interno" y dejar
-            # message.content vacío, causando errores de JSON.
-            reasoning_effort="none",
-            reasoning_format="hidden",
-            response_format={"type": "json_object"}
+
+def call_groq_vision(model, base64_image):
+    """Hace una única llamada a un modelo de visión de Groq y devuelve el job_data ya parseado"""
+    response = groq_client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": build_image_extraction_prompt()},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/jpeg;base64,{base64_image}"}}
+                ]
+            }
+        ],
+        temperature=0.1,
+        # El plan gratuito ("on_demand") de Groq limita los tokens de SALIDA
+        # por minuto (OTPM). Si ves un error 429 "Request too large... OTPM",
+        # baja este número aún más, o espera un minuto entre imágenes, o
+        # sube de plan en https://console.groq.com/settings/billing
+        max_tokens=900,
+        # Los modelos qwen3.x son de razonamiento: sin esto, la respuesta
+        # puede quedar entera en el "pensamiento interno" y dejar
+        # message.content vacío, causando errores de JSON.
+        reasoning_effort="none",
+        reasoning_format="hidden",
+        response_format={"type": "json_object"}
+    )
+
+    result_text = clean_json_response(response.choices[0].message.content or "")
+    print(f"DEBUG - Respuesta cruda de Groq ({model}):", repr(result_text)[:500])
+
+    if not result_text:
+        raise ValueError(
+            "El modelo devolvió una respuesta vacía. Intenta de nuevo o usa una imagen más nítida."
         )
 
-        result_text = clean_json_response(
-            response.choices[0].message.content or "")
-        print("DEBUG - Respuesta cruda de Groq (imagen):",
-              repr(result_text)[:500])
+    return json.loads(result_text)
 
-        if not result_text:
-            raise ValueError(
-                "El modelo devolvió una respuesta vacía. Intenta de nuevo o usa una imagen más nítida."
-            )
+def extract_with_groq_image(base64_image):
+    """Extrae información de una oferta laboral a partir de una imagen usando Groq Vision.
+    Intenta cada modelo de GROQ_VISION_MODELS en orden; si uno no existe o no hay
+    acceso a él, reintenta automáticamente con el siguiente antes de fallar."""
+    last_error = None
 
-        job_data = json.loads(result_text)
-        return finalize_job_data(job_data, "imagen")
+    for model in GROQ_VISION_MODELS:
+        try:
+            job_data = call_groq_vision(model, base64_image)
+            return finalize_job_data(job_data, f"imagen, modelo {model}")
+        except Exception as e:
+            last_error = e
+            if is_model_unavailable_error(e):
+                print(f"Modelo '{model}' no disponible ({e}). Probando siguiente modelo...")
+                continue
+            # Error real de procesamiento (no de disponibilidad de modelo): no seguir probando
+            break
 
-    except Exception as e:
-        print(f"Error al procesar la imagen con Groq: {e}")
-        messagebox.showerror(
-            "Error de Groq",
-            f"No se pudo procesar la imagen con IA:\n\n{e}\n\nVerifica tu API Key de Groq en Configuración."
-        )
-        return None
+    print(f"Error al procesar la imagen con Groq: {last_error}")
+    messagebox.showerror(
+        "Error de Groq",
+        f"No se pudo procesar la imagen con IA:\n\n{last_error}\n\n"
+        f"Verifica tu API Key de Groq, o que el modelo de visión esté habilitado "
+        f"en https://console.groq.com/playground"
+    )
+    return None
+
 # ==================== FUNCIÓN: SUBIR IMAGEN A NOTION ====================
 
 def upload_image_to_notion(pil_image):

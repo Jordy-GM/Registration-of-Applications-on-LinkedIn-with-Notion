@@ -1,12 +1,19 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_all
+
+datas = [('favicon.ico', '.')]   # <-- NUEVO: incluye el ícono como archivo dentro del bundle
+binaries = []
+hiddenimports = ['bs4', 'soupsieve']
+tmp_ret = collect_all('bs4')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['Notion2.py'],
+    ['Notion4.py'],
     pathex=[],
-    binaries=[],
-    datas=[],
-    hiddenimports=[],
+    binaries=binaries,
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -22,7 +29,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='Notion2',
+    name='Notlink',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
